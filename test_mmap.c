@@ -20,7 +20,7 @@ int main()
     int size = 2 * 4096; // 2 page
 
     // allocate memory = size bytes
-    char *address = mmap(size);
+    char *address = (char *)mmap(size);
 
     if (address == 0)
     {
