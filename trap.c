@@ -10,45 +10,136 @@
 
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
-extern uint vectors[];  // in vectors.S: array of 256 entry pointers
+extern uint vectors[]; // in vectors.S: array of 256 entry pointers
 struct spinlock tickslock;
 uint ticks;
 
-void
-tvinit(void)
+// Fuctions copied from vm.c ------------------------------------------------------------------
+// Return the address of the PTE in page table pgdir
+// that corresponds to virtual address va.  If alloc!=0,
+// create any required page table pages.
+static pte_t *
+walkpgdir(pde_t *pgdir, const void *va, int alloc)
+{
+  pde_t *pde;
+  pte_t *pgtab;
+
+  pde = &pgdir[PDX(va)];
+  if (*pde & PTE_P)
+  {
+    pgtab = (pte_t *)P2V(PTE_ADDR(*pde));
+  }
+  else
+  {
+    if (!alloc || (pgtab = (pte_t *)kalloc()) == 0)
+      return 0;
+    // Make sure all those PTE_P bits are zero.
+    memset(pgtab, 0, PGSIZE);
+    // The permissions here are overly generous, but they can
+    // be further restricted by the permissions in the page table
+    // entries, if necessary.
+    *pde = V2P(pgtab) | PTE_P | PTE_W | PTE_U;
+  }
+  return &pgtab[PTX(va)];
+}
+
+// Create PTEs for virtual addresses starting at va that refer to
+// physical addresses starting at pa. va and size might not
+// be page-aligned.
+static int
+mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
+{
+  char *a, *last;
+  pte_t *pte;
+
+  a = (char *)PGROUNDDOWN((uint)va);
+  last = (char *)PGROUNDDOWN(((uint)va) + size - 1);
+  for (;;)
+  {
+    if ((pte = walkpgdir(pgdir, a, 1)) == 0)
+      return -1;
+    if (*pte & PTE_P)
+      panic("remap");
+    *pte = pa | perm | PTE_P;
+    if (a == last)
+      break;
+    a += PGSIZE;
+    pa += PGSIZE;
+  }
+  return 0;
+}
+// -------------------------------------------------------------------------------------------
+
+void tvinit(void)
 {
   int i;
 
-  for(i = 0; i < 256; i++)
-    SETGATE(idt[i], 0, SEG_KCODE<<3, vectors[i], 0);
-  SETGATE(idt[T_SYSCALL], 1, SEG_KCODE<<3, vectors[T_SYSCALL], DPL_USER);
+  for (i = 0; i < 256; i++)
+    SETGATE(idt[i], 0, SEG_KCODE << 3, vectors[i], 0);
+  SETGATE(idt[T_SYSCALL], 1, SEG_KCODE << 3, vectors[T_SYSCALL], DPL_USER);
 
   initlock(&tickslock, "time");
 }
 
-void
-idtinit(void)
+void idtinit(void)
 {
   lidt(idt, sizeof(idt));
 }
 
-//PAGEBREAK: 41
-void
-trap(struct trapframe *tf)
+// PAGEBREAK: 41
+void trap(struct trapframe *tf)
 {
-  if(tf->trapno == T_SYSCALL){
-    if(myproc()->killed)
+  if (tf->trapno == T_PGFLT)
+  {
+    struct proc *current_process = myproc(); // get current process
+    // get the virtual address that caused the page fault
+    uint virtual_address = rcr2();
+
+    // check if the address is within the virtual address space
+    if (virtual_address >= current_process->sz)
+    {
+      cprintf("\nPage fault: Address out of bounds\n");
+      myproc()->killed = 1; // kill the process
+      return;
+    }
+    else
+    {
+      char *allocated_page = kalloc(); // allocate a physical page
+
+      if (allocated_page == 0)
+      {
+        cprintf("\nPage fault: Out of memory\n");
+        myproc()->killed = 1; // kill the process
+        return;
+      }
+      else
+      {
+        memset(allocated_page, 0, PGSIZE); // clear the page
+
+        mappages(current_process->pgdir, (char *)PGROUNDUP(virtual_address), PGSIZE, V2P(allocated_page), PTE_W | PTE_U); // map the page
+
+        switchuvm(current_process); // Update the CR3 register
+      }
+    }
+    return;
+  }
+
+  if (tf->trapno == T_SYSCALL)
+  {
+    if (myproc()->killed)
       exit();
     myproc()->tf = tf;
     syscall();
-    if(myproc()->killed)
+    if (myproc()->killed)
       exit();
     return;
   }
 
-  switch(tf->trapno){
+  switch (tf->trapno)
+  {
   case T_IRQ0 + IRQ_TIMER:
-    if(cpuid() == 0){
+    if (cpuid() == 0)
+    {
       acquire(&tickslock);
       ticks++;
       wakeup(&ticks);
@@ -60,7 +151,7 @@ trap(struct trapframe *tf)
     ideintr();
     lapiceoi();
     break;
-  case T_IRQ0 + IRQ_IDE+1:
+  case T_IRQ0 + IRQ_IDE + 1:
     // Bochs generates spurious IDE1 interrupts.
     break;
   case T_IRQ0 + IRQ_KBD:
@@ -78,9 +169,10 @@ trap(struct trapframe *tf)
     lapiceoi();
     break;
 
-  //PAGEBREAK: 13
+  // PAGEBREAK: 13
   default:
-    if(myproc() == 0 || (tf->cs&3) == 0){
+    if (myproc() == 0 || (tf->cs & 3) == 0)
+    {
       // In kernel, it must be our mistake.
       cprintf("unexpected trap %d from cpu %d eip %x (cr2=0x%x)\n",
               tf->trapno, cpuid(), tf->eip, rcr2());
@@ -97,16 +189,16 @@ trap(struct trapframe *tf)
   // Force process exit if it has been killed and is in user space.
   // (If it is still executing in the kernel, let it keep running
   // until it gets to the regular system call return.)
-  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+  if (myproc() && myproc()->killed && (tf->cs & 3) == DPL_USER)
     exit();
 
   // Force process to give up CPU on clock tick.
   // If interrupts were on while locks held, would need to check nlock.
-  if(myproc() && myproc()->state == RUNNING &&
-     tf->trapno == T_IRQ0+IRQ_TIMER)
+  if (myproc() && myproc()->state == RUNNING &&
+      tf->trapno == T_IRQ0 + IRQ_TIMER)
     yield();
 
   // Check if the process has been killed since we yielded
-  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+  if (myproc() && myproc()->killed && (tf->cs & 3) == DPL_USER)
     exit();
 }
