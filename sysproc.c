@@ -44,13 +44,13 @@ int sys_numpp(void)
     {
       physical_pages++;
     }
+  }
 
-    // check if the physical page corresponding to the stack guard page is present
-    pte = walkpgdir(current_process->pgdir, (void *)PGROUNDUP(current_process->sz), 0);
-    if (pte && (*pte & PTE_P))
-    {
-      physical_pages++;
-    }
+  // check if the physical page corresponding to the stack guard page is present
+  pte = walkpgdir(current_process->pgdir, (void *)PGROUNDUP(current_process->sz), 0);
+  if (pte && (*pte & PTE_P))
+  {
+    physical_pages++;
   }
 
   return physical_pages;
