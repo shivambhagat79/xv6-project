@@ -25,28 +25,8 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc);
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa. va and size might not
 // be page-aligned.
-static int
-mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
-{
-  char *a, *last;
-  pte_t *pte;
-
-  a = (char *)PGROUNDDOWN((uint)va);
-  last = (char *)PGROUNDDOWN(((uint)va) + size - 1);
-  for (;;)
-  {
-    if ((pte = walkpgdir(pgdir, a, 1)) == 0)
-      return -1;
-    if (*pte & PTE_P)
-      panic("remap");
-    *pte = pa | perm | PTE_P;
-    if (a == last)
-      break;
-    a += PGSIZE;
-    pa += PGSIZE;
-  }
-  return 0;
-}
+extern int
+mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
 // -------------------------------------------------------------------------------------------
 
 void tvinit(void)
